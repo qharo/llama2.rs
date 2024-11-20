@@ -1,0 +1,15 @@
+{
+  "name": "llama2_rs",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "llama2_rs_bg.wasm",
+    "llama2_rs.js",
+    "llama2_rs.d.ts"
+  ],
+  "main": "llama2_rs.js",
+  "types": "llama2_rs.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
