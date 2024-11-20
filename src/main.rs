@@ -67,11 +67,29 @@ pub struct RunState {
     pub logits: Array1<f32>,
     key_cache: Array3<f32>,
     value_cache: Array3<f32>,
+    rope_cos: Array2<f32>,
+    rope_sin: Array2<f32>
 }
 impl RunState {
     fn new(config: &Config) -> Self {
         let kv_dim = (config.dim as usize * config.n_kv_heads as usize) / config.n_heads as usize;
+        let head_size = config.dim / config.n_heads;
         
+        let pos_indices: Array1<f32> = Array1::range(0., config.seq_len as f32, 1.);
+        let head_dims: Array1<f32> = Array1::range(0., (config.dim/2) as f32, 1.)
+            .mapv(|x| (x % (head_size/2) as f32));
+        
+        // Create frequency matrix
+        let freqs = head_dims.mapv(|x| 1.0 / 10000f32.powf(2.0 * x / head_size as f32));
+        
+        // Compute outer product for position-frequency pairs
+        let theta = pos_indices.into_shape([config.seq_len, 1]).unwrap() 
+            * freqs.into_shape([1, config.dim/2]).unwrap();
+        
+        // Compute sin and cos matrices
+        let rope_cos = theta.mapv(|x| x.cos());
+        let rope_sin = theta.mapv(|x| x.sin());
+
         Self {
             x: Array1::zeros(config.dim),
             xb: Array1::zeros(config.dim),
@@ -85,6 +103,8 @@ impl RunState {
             logits: Array1::zeros(config.vocab_size),
             key_cache: Array3::zeros((config.n_layers, config.seq_len, kv_dim)),
             value_cache: Array3::zeros((config.n_layers, config.seq_len, kv_dim)),
+            rope_cos, 
+            rope_sin
         }
     }
 }
@@ -129,46 +149,6 @@ fn load_checkpoint(checkpoint_path: &str) -> io::Result<(Config, TransformerWeig
 
     let head_size = (config.dim / config.n_heads) as usize;
     let mut offset = 0;
-
-
-    // let mut arrays = Vec::new();
-    // let sizes = [
-    //     (config.vocab_size, config.dim),
-    //     (config.n_layers, config.dim),
-    //     (config.n_layers, config.dim, config.n_heads * head_size),
-    //     (config.n_layers, config.dim, config.n_kv_heads * head_size),
-    //     (config.n_layers, config.dim, config.n_kv_heads * head_size),
-    //     (config.n_layers, config.n_heads * head_size, config.dim),
-    //     (config.n_layers, config.dim),
-    //     (config.n_layers, config.dim, config.hidden_dim),
-    //     (config.n_layers, config.hidden_dim, config.dim),
-    //     (config.n_layers, config.dim, config.hidden_dim),
-    //     (config.dim,)
-    // ];
-
-    // unsafe {
-    //     let mut curr_ptr = weights_ptr;
-    //     for &size in &sizes {
-    //         let total_elements = size.iter().product();
-    //         let slice = std::slice::from_raw_parts(curr_ptr, total_elements);
-    //         arrays.push(slice.to_vec());
-    //         curr_ptr = curr_ptr.add(total_elements);
-    //     }
-    // }
-    // Ok((Config, Self {
-    //     token_embedding: Array2::from_shape_vec((sizes[0].0, sizes[0].1), arrays[0].clone())?,
-    //     rms_att: Array2::from_shape_vec((sizes[1].0, sizes[1].1), arrays[1].clone())?,
-    //     wq: Array3::from_shape_vec((sizes[2].0, sizes[2].1, sizes[2].2), arrays[2].clone())?,
-    //     wk: Array3::from_shape_vec((sizes[3].0, sizes[3].1, sizes[3].2), arrays[3].clone())?,
-    //     wv: Array3::from_shape_vec((sizes[4].0, sizes[4].1, sizes[4].2), arrays[4].clone())?,
-    //     wo: Array3::from_shape_vec((sizes[5].0, sizes[5].1, sizes[5].2), arrays[5].clone())?,
-    //     rms_ffn: Array2::from_shape_vec((sizes[6].0, sizes[6].1), arrays[6].clone())?,
-    //     w1: Array3::from_shape_vec((sizes[7].0, sizes[7].1, sizes[7].2), arrays[7].clone())?,
-    //     w2: Array3::from_shape_vec((sizes[8].0, sizes[8].1, sizes[8].2), arrays[8].clone())?,
-    //     w3: Array3::from_shape_vec((sizes[9].0, sizes[9].1, sizes[9].2), arrays[9].clone())?,
-    //     rms_final: Array1::from_shape_vec(sizes[10].0, arrays[10].clone())?,
-    //     wcls: Array2::from_shape_vec((sizes[0].0, sizes[0].1), arrays[0].clone())?,
-    // }))
 
     unsafe {
         let token_embedding_table = weights_ptr.add(offset);        
@@ -477,13 +457,10 @@ impl Transformer {
         let kv_mul = self.config.n_heads / self.config.n_kv_heads;
         let head_size = dim / self.config.n_heads;
 
-        // Copy token embedding
         let token_idx = token as usize;
         self.state.x.assign(&self.weights.token_embedding_table.slice(s![token_idx, ..]));
 
-        // Process each layer
         for l in 0..self.config.n_layers {
-            // let mut xb_temp = Array1::zeros(dim);
             
             // Attention rmsnorm
             rms_norm(
@@ -503,60 +480,46 @@ impl Transformer {
 
             // RoPE rotations
             for i in (0..dim).step_by(2) {
-                let head_dim = i % head_size;
-                let freq = 1.0 / (10000.0f32.powf(head_dim as f32 / head_size as f32));
-                let val = pos as f32 * freq;
-                let fcr = val.cos();
-                let fci = val.sin();
+                let fcr = self.state.rope_cos[[pos as usize, i/2]];
+                let fci = self.state.rope_sin[[pos as usize, i/2]]; 
                 let rotn = if i < kv_dim { 2 } else { 1 };
-                
+
+                let (v0, v1) = (self.state.q[i], self.state.q[i + 1]);
+                self.state.q[i] = v0 * fcr - v1 * fci;
+                self.state.q[i + 1] = v0 * fci + v1 * fcr;
+                 
                 match rotn {
                     2 => {
-                        // Apply to both Q and K
-                        let (v0, v1) = (self.state.q[i], self.state.q[i + 1]);
-                        self.state.q[i] = v0 * fcr - v1 * fci;
-                        self.state.q[i + 1] = v0 * fci + v1 * fcr;
-                 
                         let mut key_slice = self.state.key_cache.slice_mut(s![l, pos as usize, ..]);
                         let (v0, v1) = (key_slice[i], key_slice[i + 1]);
                         key_slice[i] = v0 * fcr - v1 * fci;
                         key_slice[i + 1] = v0 * fci + v1 * fcr;
-                  
                     },
-                    _ => {
-                        // Apply only to Q
-                        let (v0, v1) = (self.state.q[i], self.state.q[i + 1]);         
-                  
-                        self.state.q[i] = v0 * fcr - v1 * fci;
-                        self.state.q[i + 1] = v0 * fci + v1 * fcr;
-                    }
+                    _ => {}
                 }
             }
 
             for h in 0..self.config.n_heads {
-
-
-                let mut att_array = Array1::zeros(pos as usize + 1);
-
-                {
-                    let q = self.state.q.slice(s![h * head_size..(h + 1) * head_size]);
-                    for t in 0..=pos as usize {
-                        let k_slice = self.state.key_cache.slice(s![l, t, (h / kv_mul) * head_size..((h / kv_mul) + 1) * head_size]);
-                        let score = (q.to_owned() * k_slice).sum() / (head_size as f32).sqrt();
-    
-                        att_array[t] = score;
-                    }
-                }
-
+                let q = self.state.q.slice(s![h * head_size..(h + 1) * head_size]);
+                
+                let k_block = self.state.key_cache
+                    .slice(s![l, 0..=pos as usize, (h / kv_mul) * head_size..((h / kv_mul) + 1) * head_size])
+                    .to_owned();
+                
+                let mut att_array = k_block
+                    .dot(&q.view())
+                    .mapv(|x| x / (head_size as f32).sqrt());
+                
                 softmax(&mut att_array.view_mut());
-
-                let mut head_output = Array1::zeros(head_size);
-                for t in 0..=pos as usize {
-                    let v_slice = self.state.value_cache.slice(s![l, t, (h / kv_mul) * head_size..((h / kv_mul) + 1) * head_size]);
-
-                    head_output += &(&v_slice * att_array[t]);
-                }
-
+                
+                let v_block = self.state.value_cache
+                    .slice(s![l, 0..=pos as usize, (h / kv_mul) * head_size..((h / kv_mul) + 1) * head_size])
+                    .to_owned();
+                
+                let head_output = v_block
+                    .t()
+                    .dot(&att_array);
+                
                 self.state.xb.slice_mut(s![h * head_size..(h + 1) * head_size])
                     .assign(&head_output);
             }

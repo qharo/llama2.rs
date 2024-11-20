@@ -24,12 +24,6 @@ export class WasmTransformer {
    */
   constructor(model_bytes: Uint8Array, tokenizer_bytes: Uint8Array, temperature: number, topp: number);
   /**
-   * @param {string} prompt
-   * @param {number} max_tokens
-   * @returns {string}
-   */
-  generate(prompt: string, max_tokens: number): string;
-  /**
    * @param {number} token
    * @param {number} pos
    */
@@ -62,7 +56,6 @@ export interface InitOutput {
   readonly wasmconfig_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
   readonly __wbg_wasmtransformer_free: (a: number, b: number) => void;
   readonly wasmtransformer_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
-  readonly wasmtransformer_generate: (a: number, b: number, c: number, d: number, e: number) => void;
   readonly wasmtransformer_forward: (a: number, b: number, c: number) => void;
   readonly wasmtransformer_get_next_token: (a: number, b: number, c: number, d: number, e: number) => number;
   readonly wasmtransformer_encode: (a: number, b: number, c: number, d: number) => void;

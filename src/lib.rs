@@ -88,37 +88,7 @@ impl WasmTransformer {
         })
     }
 
-    #[wasm_bindgen]
-    pub fn generate(&mut self, prompt: &str, max_tokens: usize) -> Result<String, JsValue> {
-        let mut output = String::new();
-        let prompt_tokens = self.tokenizer.encode(prompt, true, false);
-        
-        if prompt_tokens.is_empty() {
-            return Err(JsValue::from_str("Expected at least 1 prompt token"));
-        }
 
-        let mut token = prompt_tokens[0];
-        let mut pos = 0;
-        let steps = max_tokens.min(self.transformer.config.seq_len);
-
-        while pos < steps {
-            self.transformer.forward(token as i32, pos as i32);
-            
-            let next = if pos < prompt_tokens.len() - 1 {
-                prompt_tokens[pos + 1]
-            } else {
-                self.sampler.sample(self.transformer.state.logits.as_slice_mut().unwrap())
-            };
-            
-            pos += 1;
-            if next == 1 { break; }
-
-            output.push_str(self.tokenizer.decode(token, next));
-            token = next;
-        }
-
-        Ok(output)
-    }
     #[wasm_bindgen]
     pub fn forward(&mut self, token: i32, pos: i32) {
         self.transformer.forward(token, pos);
