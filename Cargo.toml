@@ -21,6 +21,15 @@ getrandom = { version = "0.2", features = ["js"] }
 # Testing utilities
 approx = "0.5"    
 
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [lib]
 crate-type = ["cdylib"]
 
+[build]
+rustflags = ["-C", "target-feature=+simd128"]

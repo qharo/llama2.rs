@@ -130,16 +130,48 @@ fn load_checkpoint(checkpoint_path: &str) -> io::Result<(Config, TransformerWeig
     let head_size = (config.dim / config.n_heads) as usize;
     let mut offset = 0;
 
+
+    // let mut arrays = Vec::new();
+    // let sizes = [
+    //     (config.vocab_size, config.dim),
+    //     (config.n_layers, config.dim),
+    //     (config.n_layers, config.dim, config.n_heads * head_size),
+    //     (config.n_layers, config.dim, config.n_kv_heads * head_size),
+    //     (config.n_layers, config.dim, config.n_kv_heads * head_size),
+    //     (config.n_layers, config.n_heads * head_size, config.dim),
+    //     (config.n_layers, config.dim),
+    //     (config.n_layers, config.dim, config.hidden_dim),
+    //     (config.n_layers, config.hidden_dim, config.dim),
+    //     (config.n_layers, config.dim, config.hidden_dim),
+    //     (config.dim,)
+    // ];
+
+    // unsafe {
+    //     let mut curr_ptr = weights_ptr;
+    //     for &size in &sizes {
+    //         let total_elements = size.iter().product();
+    //         let slice = std::slice::from_raw_parts(curr_ptr, total_elements);
+    //         arrays.push(slice.to_vec());
+    //         curr_ptr = curr_ptr.add(total_elements);
+    //     }
+    // }
+    // Ok((Config, Self {
+    //     token_embedding: Array2::from_shape_vec((sizes[0].0, sizes[0].1), arrays[0].clone())?,
+    //     rms_att: Array2::from_shape_vec((sizes[1].0, sizes[1].1), arrays[1].clone())?,
+    //     wq: Array3::from_shape_vec((sizes[2].0, sizes[2].1, sizes[2].2), arrays[2].clone())?,
+    //     wk: Array3::from_shape_vec((sizes[3].0, sizes[3].1, sizes[3].2), arrays[3].clone())?,
+    //     wv: Array3::from_shape_vec((sizes[4].0, sizes[4].1, sizes[4].2), arrays[4].clone())?,
+    //     wo: Array3::from_shape_vec((sizes[5].0, sizes[5].1, sizes[5].2), arrays[5].clone())?,
+    //     rms_ffn: Array2::from_shape_vec((sizes[6].0, sizes[6].1), arrays[6].clone())?,
+    //     w1: Array3::from_shape_vec((sizes[7].0, sizes[7].1, sizes[7].2), arrays[7].clone())?,
+    //     w2: Array3::from_shape_vec((sizes[8].0, sizes[8].1, sizes[8].2), arrays[8].clone())?,
+    //     w3: Array3::from_shape_vec((sizes[9].0, sizes[9].1, sizes[9].2), arrays[9].clone())?,
+    //     rms_final: Array1::from_shape_vec(sizes[10].0, arrays[10].clone())?,
+    //     wcls: Array2::from_shape_vec((sizes[0].0, sizes[0].1), arrays[0].clone())?,
+    // }))
+
     unsafe {
-        // First load using raw pointers
         let token_embedding_table = weights_ptr.add(offset);        
-        // println!("Rust token_embedding first 5: {} {} {} {} {}", 
-        // *token_embedding_table, 
-        // *token_embedding_table.add(1),
-        // *token_embedding_table.add(2),
-        // *token_embedding_table.add(3),
-        // *token_embedding_table.add(4)
-        // );
         offset += config.vocab_size * config.dim;
 
         let rms_att_weight = weights_ptr.add(offset); 
@@ -438,8 +470,6 @@ impl Transformer {
         })
     }
 
-
-    // OLD FORWARD FUNC BELOW
     pub fn forward(&mut self, token: i32, pos: i32) {
         
         let dim = self.config.dim;
@@ -453,29 +483,24 @@ impl Transformer {
 
         // Process each layer
         for l in 0..self.config.n_layers {
-    
-            // println!("\nRust - Layer {}", l);
-
-            let mut xb_temp = Array1::zeros(dim);
+            // let mut xb_temp = Array1::zeros(dim);
             
             // Attention rmsnorm
             rms_norm(
-                &mut xb_temp,
+                &mut self.state.xb,
                 &self.state.x,
                 &self.weights.rms_att_weight.slice(s![l, ..]).into()
             );
-            self.state.xb.assign(&xb_temp);
         
             self.state.q.assign(&self.weights.wq.slice(s![l, .., ..]).dot(&self.state.xb));
             {
                 let mut key_slice = self.state.key_cache.slice_mut(s![l, pos as usize, ..]);
-                key_slice.assign(&self.weights.wk.slice(s![l, .., ..]).dot(&self.state.xb));
-            }
-            {
                 let mut value_slice = self.state.value_cache.slice_mut(s![l, pos as usize, ..]);
+
+                key_slice.assign(&self.weights.wk.slice(s![l, .., ..]).dot(&self.state.xb));
                 value_slice.assign(&self.weights.wv.slice(s![l, .., ..]).dot(&self.state.xb));
             }
-            
+
             // RoPE rotations
             for i in (0..dim).step_by(2) {
                 let head_dim = i % head_size;
@@ -508,28 +533,23 @@ impl Transformer {
                 }
             }
 
-            // Multi-head attention - Sequential version to avoid borrow checker issues
-            let mut xb_new = Array1::zeros(dim);
             for h in 0..self.config.n_heads {
 
-                let q = self.state.q.slice(s![h * head_size..(h + 1) * head_size]);
 
-                let mut att_scores = Vec::with_capacity(pos as usize + 1);
+                let mut att_array = Array1::zeros(pos as usize + 1);
 
-                // Calculate attention scores
-                for t in 0..=pos as usize {
-                    let k_slice = self.state.key_cache.slice(s![l, t, (h / kv_mul) * head_size..((h / kv_mul) + 1) * head_size]);
-                    let score = (q.to_owned() * k_slice).sum() / (head_size as f32).sqrt();
-
-                    // println!("{:?}", score);
-                    att_scores.push(score);
+                {
+                    let q = self.state.q.slice(s![h * head_size..(h + 1) * head_size]);
+                    for t in 0..=pos as usize {
+                        let k_slice = self.state.key_cache.slice(s![l, t, (h / kv_mul) * head_size..((h / kv_mul) + 1) * head_size]);
+                        let score = (q.to_owned() * k_slice).sum() / (head_size as f32).sqrt();
+    
+                        att_array[t] = score;
+                    }
                 }
 
-                // Convert to Array1 for softmax
-                let mut att_array = Array1::from(att_scores);
                 softmax(&mut att_array.view_mut());
 
-                // Weighted sum of values
                 let mut head_output = Array1::zeros(head_size);
                 for t in 0..=pos as usize {
                     let v_slice = self.state.value_cache.slice(s![l, t, (h / kv_mul) * head_size..((h / kv_mul) + 1) * head_size]);
@@ -537,58 +557,40 @@ impl Transformer {
                     head_output += &(&v_slice * att_array[t]);
                 }
 
-                // Copy to the appropriate slice of xb_new
-                xb_new.slice_mut(s![h * head_size..(h + 1) * head_size])
+                self.state.xb.slice_mut(s![h * head_size..(h + 1) * head_size])
                     .assign(&head_output);
             }
 
-            // Final projection and residual
-            self.state.xb.assign(&xb_new);
             self.state.xb2.assign(&self.weights.wo.slice(s![l, .., ..]).dot(&self.state.xb));
-
             self.state.x += &self.state.xb2;
 
             // FFN
             rms_norm(
-                &mut xb_temp,
+                &mut self.state.xb,
                 &self.state.x,
                 &self.weights.rms_ffn_weight.slice(s![l, ..]).into()
             );
-            self.state.xb.assign(&xb_temp);
-
-            let w1_slice = self.weights.w1.slice(s![l, .., ..]);
-            
-
-            // FFN projections
             self.state.hb.assign(&self.weights.w1.slice(s![l, .., ..]).dot(&self.state.xb));
             self.state.hb2.assign(&self.weights.w3.slice(s![l, .., ..]).dot(&self.state.xb)); 
                
-
-            // SwiGLU activation
             self.state.hb.mapv_inplace(|x| x * (1.0 / (1.0 + (-x).exp())));
             self.state.hb *= &self.state.hb2;
     
-
-            // Final FFN projection and residual
             self.state.xb.assign(&self.weights.w2.slice(s![l, .., ..]).dot(&self.state.hb));
     
             self.state.x += &self.state.xb;
-        
         }
 
-        // Final normalization - Use temporary buffer to avoid borrow issues
-        let mut x_temp = Array1::zeros(dim);
-        rms_norm(
-            &mut x_temp,
-            &self.state.x,
-            &self.weights.rms_final_weight.view()
-        );
-        self.state.x.assign(&x_temp);
-        // println!("\nRust - First 4 values after final rmsnorm: {} {} {} {}", 
-        //          self.state.x[0], self.state.x[1], self.state.x[2], self.state.x[3]);
-    
+        {
+            let mut x_temp = Array1::zeros(dim);
+            rms_norm(
+                &mut x_temp,
+                &self.state.x,
+                &self.weights.rms_final_weight.view()
+            );
+            self.state.x.assign(&x_temp);
+        }
 
-        // Project to logits
         self.state.logits.assign(&self.state.x.dot(&self.weights.wcls.t()));
     }
 }
