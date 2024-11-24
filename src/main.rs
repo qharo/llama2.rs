@@ -267,6 +267,183 @@ fn load_checkpoint(checkpoint_path: &str) -> io::Result<(Config, TransformerWeig
     }
 }
 
+fn parse_weights_from_ptr<T: AsRef<[u8]>>(
+    data: T,
+    skip_rope: bool
+) -> io::Result<(Config, TransformerWeights)> {
+    use std::io::{Error, ErrorKind, Cursor, Read};
+    
+    let bytes = data.as_ref();
+    let mut cursor = Cursor::new(bytes);
+    
+    // Read config integers
+    let mut buffer = [0i32; 7];
+    unsafe {
+        let slice = slice::from_raw_parts_mut(
+            buffer.as_mut_ptr() as *mut u8,
+            buffer.len() * std::mem::size_of::<i32>()
+        );
+        cursor.read_exact(slice)?;
+    }
+    
+    // Validate config values
+    for (i, &value) in buffer.iter().enumerate() {
+        if value <= 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid config value at position {}: {}", i, value)
+            ));
+        }
+    }
+    
+    let config = Config {
+        dim: buffer[0] as usize,
+        hidden_dim: buffer[1] as usize,
+        n_layers: buffer[2] as usize,
+        n_heads: buffer[3] as usize,
+        n_kv_heads: buffer[4] as usize,
+        vocab_size: buffer[5] as usize,
+        seq_len: buffer[6] as usize,
+    };
+
+    let shared_weights = config.vocab_size > 0;
+    let head_size = config.dim / config.n_heads;
+    
+    // Get pointer to weights data after config
+    let weights_start = 7 * std::mem::size_of::<i32>();
+    let weights_data = &bytes[weights_start..];
+    let weights_ptr = weights_data.as_ptr() as *const f32;
+    
+    let mut offset = 0;
+    
+    unsafe {
+        // Token embedding table
+        let token_embedding_table = weights_ptr.add(offset);
+        offset += config.vocab_size * config.dim;
+        
+        // RMS attention weights
+        let rms_att_weight = weights_ptr.add(offset);
+        offset += config.n_layers * config.dim;
+        
+        // Query weights
+        let wq = weights_ptr.add(offset);
+        offset += config.n_layers * config.dim * (config.n_heads * head_size);
+        
+        // Key weights
+        let wk = weights_ptr.add(offset);
+        offset += config.n_layers * config.dim * (config.n_kv_heads * head_size);
+        
+        // Value weights
+        let wv = weights_ptr.add(offset);
+        offset += config.n_layers * config.dim * (config.n_kv_heads * head_size);
+        
+        // Output projection weights
+        let wo = weights_ptr.add(offset);
+        offset += config.n_layers * (config.n_heads * head_size) * config.dim;
+        
+        // RMS feedforward weights
+        let rms_ffn_weight = weights_ptr.add(offset);
+        offset += config.n_layers * config.dim;
+        
+        // Feedforward weights
+        let w1 = weights_ptr.add(offset);
+        offset += config.n_layers * config.dim * config.hidden_dim;
+        
+        let w2 = weights_ptr.add(offset);
+        offset += config.n_layers * config.hidden_dim * config.dim;
+        
+        let w3 = weights_ptr.add(offset);
+        offset += config.n_layers * config.dim * config.hidden_dim;
+        
+        // Final RMS normalization weights
+        let rms_final_weight = weights_ptr.add(offset);
+        offset += config.dim;
+        
+        // Skip rope frequencies if needed
+        if skip_rope {
+            offset += config.seq_len * head_size;
+        }
+        
+        // Classification weights (shared with embedding or separate)
+        let wcls_ptr = if shared_weights {
+            token_embedding_table
+        } else {
+            weights_ptr.add(offset)
+        };
+        
+        // Convert raw pointers to ndarray types
+        let weights = TransformerWeights {
+            token_embedding_table: Array2::from_shape_vec(
+                (config.vocab_size, config.dim),
+                std::slice::from_raw_parts(token_embedding_table, config.vocab_size * config.dim).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            rms_att_weight: Array2::from_shape_vec(
+                (config.n_layers, config.dim),
+                std::slice::from_raw_parts(rms_att_weight, config.n_layers * config.dim).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            wq: Array3::from_shape_vec(
+                (config.n_layers, config.dim, config.n_heads * head_size),
+                std::slice::from_raw_parts(wq, config.n_layers * config.dim * (config.n_heads * head_size)).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            wk: Array3::from_shape_vec(
+                (config.n_layers, config.dim, config.n_kv_heads * head_size),
+                std::slice::from_raw_parts(wk, config.n_layers * config.dim * (config.n_kv_heads * head_size)).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            wv: Array3::from_shape_vec(
+                (config.n_layers, config.dim, config.n_kv_heads * head_size),
+                std::slice::from_raw_parts(wv, config.n_layers * config.dim * (config.n_kv_heads * head_size)).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            wo: Array3::from_shape_vec(
+                (config.n_layers, config.n_heads * head_size, config.dim),
+                std::slice::from_raw_parts(wo, config.n_layers * (config.n_heads * head_size) * config.dim).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            rms_ffn_weight: Array2::from_shape_vec(
+                (config.n_layers, config.dim),
+                std::slice::from_raw_parts(rms_ffn_weight, config.n_layers * config.dim).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            w1: Array3::from_shape_vec(
+                (config.n_layers, config.hidden_dim, config.dim),
+                std::slice::from_raw_parts(w1, config.n_layers * config.dim * config.hidden_dim).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            w2: Array3::from_shape_vec(
+                (config.n_layers, config.dim, config.hidden_dim),
+                std::slice::from_raw_parts(w2, config.n_layers * config.hidden_dim * config.dim).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            w3: Array3::from_shape_vec(
+                (config.n_layers, config.hidden_dim, config.dim),
+                std::slice::from_raw_parts(w3, config.n_layers * config.dim * config.hidden_dim).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            rms_final_weight: Array1::from_shape_vec(
+                config.dim,
+                std::slice::from_raw_parts(rms_final_weight, config.dim).to_vec()
+            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+            
+            wcls: if shared_weights {
+                Array2::from_shape_vec(
+                    (config.vocab_size, config.dim),
+                    std::slice::from_raw_parts(token_embedding_table, config.vocab_size * config.dim).to_vec()
+                ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?
+            } else {
+                Array2::from_shape_vec(
+                    (config.vocab_size, config.dim),
+                    std::slice::from_raw_parts(wcls_ptr, config.vocab_size * config.dim).to_vec()
+                ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?
+            },
+        };
+
+        Ok((config, weights))
+    }
+}
 
 // OLD RMS NORM BELOW
 fn rms_norm(out: &mut Array1<f32>, x: &Array1<f32>, weight: &ArrayView1<f32>) {
@@ -291,10 +468,11 @@ fn softmax(x: &mut ArrayViewMut1<f32>) {
 }
 
 impl Transformer {
-    pub fn new(checkpoint_path: &str) -> io::Result<Self> {
-        let (config, weights) = load_checkpoint(checkpoint_path)?;
+
+    pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
+        let (config, weights) = parse_weights_from_ptr(bytes, false)?;
         let state = RunState::new(&config);
-    
+        
         Ok(Self {
             config,
             weights,
@@ -302,145 +480,11 @@ impl Transformer {
         })
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
-        use std::io::{Error, ErrorKind};
+    pub fn load_checkpoint(checkpoint_path: &str) -> io::Result<Self> {
+        let file = File::open(checkpoint_path)?;
+        let mmap = unsafe { MmapOptions::new().map(&file)? };
         
-        let mut cursor = Cursor::new(bytes);
-        
-        let mut buffer = [0i32; 7];
-        unsafe {
-            let slice = slice::from_raw_parts_mut(
-                buffer.as_mut_ptr() as *mut u8,
-                buffer.len() * std::mem::size_of::<i32>()
-            );
-            cursor.read_exact(slice)?;
-        }
-        
-        for (i, &value) in buffer.iter().enumerate() {
-            if value <= 0 {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Invalid config value at position {}: {}", i, value)
-                ));
-            }
-        }
-        
-        let config = Config {
-            dim: buffer[0] as usize,
-            hidden_dim: buffer[1] as usize,
-            n_layers: buffer[2] as usize,
-            n_heads: buffer[3] as usize,
-            n_kv_heads: buffer[4] as usize,
-            vocab_size: buffer[5] as usize,
-            seq_len: buffer[6] as usize,
-        };
-
-        let shared_weights = config.vocab_size > 0;
-        cursor.set_position(0);
-
-        let head_size = config.dim / config.n_heads;
-        let mut weights_buffer = vec![0f32; bytes.len() / std::mem::size_of::<f32>()];
-        
-        unsafe {
-            let slice = slice::from_raw_parts_mut(
-                weights_buffer.as_mut_ptr() as *mut u8,
-                weights_buffer.len() * std::mem::size_of::<f32>()
-            );
-            cursor.read_exact(slice)?;
-        }
-        
-        let mut offset = 7; // Skip config integers
-
-        let token_embedding_table = Array2::from_shape_vec(
-            (config.vocab_size, config.dim),
-            weights_buffer[offset..offset + config.vocab_size * config.dim].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.vocab_size * config.dim;
-        
-        let rms_att_weight = Array2::from_shape_vec(
-            (config.n_layers, config.dim),
-            weights_buffer[offset..offset + config.n_layers * config.dim].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.n_layers * config.dim;
-        
-        let wq = Array3::from_shape_vec(
-            (config.n_layers, config.dim, config.n_heads * head_size),
-            weights_buffer[offset..offset + config.n_layers * config.dim * (config.n_heads * head_size)].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.n_layers * config.dim * (config.n_heads * head_size);
-        
-        let wk = Array3::from_shape_vec(
-            (config.n_layers, config.dim, config.n_kv_heads * head_size),
-            weights_buffer[offset..offset + config.n_layers * config.dim * (config.n_kv_heads * head_size)].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.n_layers * config.dim * (config.n_kv_heads * head_size);
-        
-        let wv = Array3::from_shape_vec(
-            (config.n_layers, config.dim, config.n_kv_heads * head_size),
-            weights_buffer[offset..offset + config.n_layers * config.dim * (config.n_kv_heads * head_size)].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.n_layers * config.dim * (config.n_kv_heads * head_size);
-        
-        let wo = Array3::from_shape_vec(
-            (config.n_layers, config.n_heads * head_size, config.dim),
-            weights_buffer[offset..offset + config.n_layers * (config.n_heads * head_size) * config.dim].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.n_layers * (config.n_heads * head_size) * config.dim;
-        
-        let rms_ffn_weight = Array2::from_shape_vec(
-            (config.n_layers, config.dim),
-            weights_buffer[offset..offset + config.n_layers * config.dim].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.n_layers * config.dim;
-        
-        let w1 = Array3::from_shape_vec(
-            (config.n_layers, config.hidden_dim, config.dim),
-            weights_buffer[offset..offset + config.n_layers * config.dim * config.hidden_dim].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.n_layers * config.dim * config.hidden_dim;
-        
-        let w2 = Array3::from_shape_vec(
-            (config.n_layers,  config.dim, config.hidden_dim,),
-            weights_buffer[offset..offset + config.n_layers * config.hidden_dim * config.dim].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.n_layers * config.hidden_dim * config.dim;
-        
-        let w3 = Array3::from_shape_vec(
-            (config.n_layers, config.hidden_dim, config.dim),
-            weights_buffer[offset..offset + config.n_layers * config.dim * config.hidden_dim].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.n_layers * config.dim * config.hidden_dim;
-        
-        let rms_final_weight = Array1::from_shape_vec(
-            config.dim,
-            weights_buffer[offset..offset + config.dim].to_vec()
-        ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-        offset += config.dim;
-        
-        let wcls = if shared_weights {
-            token_embedding_table.clone()
-        } else {
-            Array2::from_shape_vec(
-                (config.vocab_size, config.dim),
-                weights_buffer[offset..offset + config.vocab_size * config.dim].to_vec()
-            ).map_err(|e| Error::new(ErrorKind::InvalidData, e))?
-        };
-        
-        let weights = TransformerWeights {
-            token_embedding_table,
-            rms_att_weight,
-            wq,
-            wk,
-            wv,
-            wo,
-            rms_ffn_weight,
-            w1,
-            w2,
-            w3,
-            rms_final_weight,
-            wcls,
-        };
-        
+        let (config, weights) = parse_weights_from_ptr(&mmap[..], true)?;
         let state = RunState::new(&config);
         
         Ok(Self {
@@ -527,7 +571,6 @@ impl Transformer {
             self.state.xb2.assign(&self.weights.wo.slice(s![l, .., ..]).dot(&self.state.xb));
             self.state.x += &self.state.xb2;
 
-            // FFN
             rms_norm(
                 &mut self.state.xb,
                 &self.state.x,
@@ -535,10 +578,11 @@ impl Transformer {
             );
             self.state.hb.assign(&self.weights.w1.slice(s![l, .., ..]).dot(&self.state.xb));
             self.state.hb2.assign(&self.weights.w3.slice(s![l, .., ..]).dot(&self.state.xb)); 
-               
+            
+            // SiLU
             self.state.hb.mapv_inplace(|x| x * (1.0 / (1.0 + (-x).exp())));
             self.state.hb *= &self.state.hb2;
-    
+
             self.state.xb.assign(&self.weights.w2.slice(s![l, .., ..]).dot(&self.state.hb));
     
             self.state.x += &self.state.xb;
@@ -582,15 +626,13 @@ pub struct Tokenizer {
     sorted_vocab: Option<Vec<TokenIndex>>,
 }
 impl Tokenizer {
-    pub fn new(tokenizer_path: &str, vocab_size: usize) -> io::Result<Self>{
+
+    fn read_from<R: Read>(reader: &mut R, vocab_size: usize) -> io::Result<Self> {
         let mut byte_pieces = [0u8; 512];
         for i in 0..256 {
             byte_pieces[i * 2] = i as u8;
             byte_pieces[i * 2 + 1] = 0;
         }
-
-        let file = File::open(tokenizer_path)?;
-        let mut reader = BufReader::new(file);
 
         let mut max_token_length_bytes = [0u8; 4];
         reader.read_exact(&mut max_token_length_bytes)?;
@@ -599,69 +641,23 @@ impl Tokenizer {
         let mut vocab = Vec::with_capacity(vocab_size);
         let mut vocab_scores = Vec::with_capacity(vocab_size);
 
-        for _ in 0..vocab_size{
-
+        for _ in 0..vocab_size {
             let mut score_bytes = [0u8; 4];
             reader.read_exact(&mut score_bytes)?;
             let score = f32::from_ne_bytes(score_bytes);
             vocab_scores.push(score);
 
-
             let mut len_bytes = [0u8; 4];
             reader.read_exact(&mut len_bytes)?;
             let len = i32::from_ne_bytes(len_bytes) as usize;
 
-
             let mut string_data = vec![0u8; len];
             reader.read_exact(&mut string_data)?;
             
-            // Convert to string, handle invalid UTF-8 by replacing invalid sequences
             let string = String::from_utf8_lossy(&string_data).into_owned();
             vocab.push(string);
         }
 
-        Ok( Self {
-            vocab, 
-            vocab_scores, 
-            max_token_length, 
-            byte_pieces,
-            sorted_vocab: None,
-        })
-    }
-
-    pub fn from_bytes(bytes: &[u8], vocab_size: usize) -> io::Result<Self> {
-        let mut cursor = Cursor::new(bytes);
-        let mut byte_pieces = [0u8; 512];
-        
-        for i in 0..256 {
-            byte_pieces[i * 2] = i as u8;
-            byte_pieces[i * 2 + 1] = 0;
-        }
-        
-        let mut max_token_length_bytes = [0u8; 4];
-        cursor.read_exact(&mut max_token_length_bytes)?;
-        let max_token_length = i32::from_ne_bytes(max_token_length_bytes) as usize;
-        
-        let mut vocab = Vec::with_capacity(vocab_size);
-        let mut vocab_scores = Vec::with_capacity(vocab_size);
-        
-        for _ in 0..vocab_size {
-            let mut score_bytes = [0u8; 4];
-            cursor.read_exact(&mut score_bytes)?;
-            let score = f32::from_ne_bytes(score_bytes);
-            vocab_scores.push(score);
-            
-            let mut len_bytes = [0u8; 4];
-            cursor.read_exact(&mut len_bytes)?;
-            let len = i32::from_ne_bytes(len_bytes) as usize;
-            
-            let mut string_data = vec![0u8; len];
-            cursor.read_exact(&mut string_data)?;
-            
-            let string = String::from_utf8_lossy(&string_data).into_owned();
-            vocab.push(string);
-        }
-        
         Ok(Self {
             vocab,
             vocab_scores,
@@ -670,6 +666,16 @@ impl Tokenizer {
             sorted_vocab: None,
         })
     }
+    pub fn new(tokenizer_path: &str, vocab_size: usize) -> io::Result<Self> {
+        let file = File::open(tokenizer_path)?;
+        let mut reader = BufReader::new(file);
+        Self::read_from(&mut reader, vocab_size)
+    }
+    pub fn from_bytes(bytes: &[u8], vocab_size: usize) -> io::Result<Self> {
+        let mut cursor = Cursor::new(bytes);
+        Self::read_from(&mut cursor, vocab_size)
+    }
+
 
     pub fn encode(&mut self, text: &str, bos: bool, eos: bool) -> Vec<usize>{
         let mut tokens = Vec::with_capacity(text.len() + 2);
@@ -892,16 +898,16 @@ impl Sampler {
         assert_eq!(logits.len(), self.vocab_size, "Logits length must match vocab size");
 
         if self.temperature == 0.0 {
-            // Greedy argmax sampling
+            // deterministic greedy sampling
             return Self::sample_argmax(logits);
         }
 
-        // Apply temperature
+        // temperature scaling
         for logit in logits.iter_mut() {
             *logit /= self.temperature;
         }
 
-        // Apply softmax
+        // softmax
         let max_logit = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
         let mut sum = 0.0;
         
@@ -1025,7 +1031,7 @@ fn main() -> io::Result<()> {
     temperature = temperature.max(0.0);
     topp = topp.clamp(0.0, 1.0);
     
-    let mut transformer = Transformer::new(checkpoint_path)?;
+    let mut transformer = Transformer::load_checkpoint(checkpoint_path)?;
     if steps == 0 || steps > transformer.config.seq_len {
         steps = transformer.config.seq_len;
     }
