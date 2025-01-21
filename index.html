@@ -92,8 +92,9 @@
             const statsDiv = document.getElementById("stats");
 
             async function loadModel() {
-                console.log("Loading model...");
                 if (transformer) return transformer;
+
+                console.log("Loading model...");
                 await init();
 
                 const modelResponse = await fetch("model.bin");
