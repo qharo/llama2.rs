@@ -1,127 +1,184 @@
 <!DOCTYPE html>
 <html>
-<head>
-    <meta charset="utf-8">
-    <title>llama2.rs</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-50">
-    <header class="bg-white shadow-sm">
-        <div class="mx-auto max-w-3xl px-4 py-4">
-            <div class="flex items-center justify-between">
-                <h1 class="text-2xl font-bold text-gray-900">llama2.rs</h1>
-                <div class="flex items-center gap-4">
-                    <a href="https://qharo.github.io/projects/llama2.rs/" class="text-sm text-gray-600 hover:text-gray-900">About</a>
-                    <button 
-                        id="generate"
-                        class="rounded bg-indigo-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-indigo-700 focus:outline-none focus:ring"
-                        type="button"
-                    >
-                        Generate
-                    </button>
+    <head>
+        <meta charset="utf-8" />
+        <title>llama2.rs</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-gray-50 min-h-screen flex items-center justify-center">
+        <main class="mx-auto max-w-6xl px-4 w-full sm:px-6 lg:px-8">
+            <div
+                class="flex flex-col md:flex-row gap-8 items-center justify-center"
+            >
+                <!-- Left Column - Narrower -->
+                <div class="flex-none max-w-md space-y-6">
+                    <div class="space-y-4">
+                        <h2 class="text-3xl font-bold text-gray-900">
+                            TinyLlama Story Generator
+                        </h2>
+                        <p class="text-gray-600 text-lg">
+                            A 15M parameter Llama2 model, inspired by
+                            <a
+                                class="text-indigo-600"
+                                href="https://github.com/karpathy/llama2.c"
+                                target="_blank"
+                                >llama2.c</a
+                            >
+                            and trained on
+                            <a
+                                class="text-indigo-600"
+                                href="https://arxiv.org/abs/2305.07759"
+                                target="_blank"
+                                >children's stories</a
+                            >. Start with a story prompt and let it complete
+                            your tale - runs Rust+WASM completely directly in
+                            your browser.
+                            <a
+                                class="text-indigo-600"
+                                href="https://qharo.github.io/projects/llama2.rs/"
+                                target="_blank"
+                                >Here's how.</a
+                            >
+                        </p>
+                    </div>
+
+                    <div class="space-y-4">
+                        <!-- <h3 class="text-xl font-semibold">How to use</h3>
+                        <ul class="space-y-3 text-gray-600">
+                            <li class="flex items-center gap-2">
+                                <span class="text-2xl">✍️</span>
+                                Write 2-3 sentences to start your story
+                            </li>
+                            <li class="flex items-center gap-2">
+                                <span class="text-2xl">🚀</span>
+                                Click Generate to continue the narrative
+                            </li>
+                            <li class="flex items-center gap-2">
+                                <span class="text-2xl">🔄</span>
+                                Edit & repeat to guide the AI's direction
+                            </li>
+                        </ul> -->
+
+                        <!-- Generate button moved here -->
+                        <button
+                            id="generate"
+                            class="mt-4 w-full rounded bg-indigo-600 px-5 py-3 text-lg font-medium text-white transition hover:bg-indigo-700 focus:outline-none focus:ring"
+                            type="button"
+                        >
+                            Generate Story
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Right Column - Expanded -->
+                <div class="flex-1 w-full">
+                    <div class="w-full mx-auto relative">
+                        <div
+                            class="overflow-hidden rounded-lg border border-gray-200 shadow-sm focus-within:border-blue-600 focus-within:ring-1 focus-within:ring-blue-600"
+                        >
+                            <textarea
+                                id="content"
+                                class="w-full resize-none border-none align-top focus:ring-0 p-4 font-mono text-base min-h-[300px] md:min-h-[500px] sm:text-base lg:text-base"
+                                rows="10"
+                                placeholder="Once upon a time, there was a brave little rabbit who..."
+                            ></textarea>
+                        </div>
+                        <div
+                            id="stats"
+                            class="absolute bottom-3 right-3 text-sm text-gray-500"
+                        ></div>
+                    </div>
                 </div>
             </div>
-        </div>
-    </header>
+        </main>
+        <script type="module">
+            import init, { WasmTransformer } from "./pkg/llama2_rs.js";
 
+            let transformer;
+            let isGenerating = false;
 
-    <main class="mx-auto max-w-4xl px-4 py-8 sm:px-6 lg:px-8">
-        <div class="w-full max-w-4xl mx-auto relative">
-            <div class="overflow-hidden rounded-lg border border-gray-200 shadow-sm focus-within:border-blue-600 focus-within:ring-1 focus-within:ring-blue-600">
-                <textarea
-                    id="content"
-                    class="w-full resize-none border-none align-top focus:ring-0 p-4 font-mono text-base sm:text-base lg:text-base"
-                    rows="20"
-                    placeholder="Enter your prompt here..."
-                ></textarea>
-            </div>
-            <div id="stats" class="absolute bottom-3 right-3 text-sm text-gray-500"></div>
-        </div>
-    </main>
+            const generateBtn = document.getElementById("generate");
+            const contentArea = document.getElementById("content");
+            const statsDiv = document.getElementById("stats");
 
-    <script type="module">
-        import init, { WasmTransformer } from './pkg/llama2_rs.js';
+            async function loadModel() {
+                if (transformer) return transformer;
+                await init();
 
-        let transformer;
-        let isGenerating = false;
+                const modelResponse = await fetch("model.bin");
+                const modelBytes = await modelResponse.arrayBuffer();
 
-        const generateBtn = document.getElementById('generate');
-        const contentArea = document.getElementById('content');
-        const statsDiv = document.getElementById('stats');
+                const tokenizerResponse = await fetch("tokenizer.bin");
+                const tokenizerBytes = await tokenizerResponse.arrayBuffer();
 
-        async function loadModel() {
-            if (transformer) return transformer;
-            await init();
-            
-            const modelResponse = await fetch('model.bin');
-            const modelBytes = await modelResponse.arrayBuffer();
-            
-            const tokenizerResponse = await fetch('tokenizer.bin');
-            const tokenizerBytes = await tokenizerResponse.arrayBuffer();
-            
-            return new WasmTransformer(
-                new Uint8Array(modelBytes),
-                new Uint8Array(tokenizerBytes),
-                0.8,
-                0.9
-            );
-        }
-
-        async function generate() {
-            if (isGenerating) return;
-
-            try {
-                isGenerating = true;
-                generateBtn.disabled = true;
-                contentArea.disabled = true;
-                statsDiv.textContent = '';
-                
-                const prompt = contentArea.value;
-                transformer = await loadModel();
-                const promptTokens = transformer.encode(prompt);
-                let token = promptTokens[0];
-                let pos = 0;
-                
-                contentArea.value = prompt;
-                const startTime = performance.now();
-                let generatedTokens = 0;
-                
-                while (pos < 256) {
-                    transformer.forward(token, pos);
-                    const next = transformer.get_next_token(token, pos, promptTokens);
-                    
-                    if (next === 1) break;
-                    
-                    const text = transformer.decode(token, next);
-                    if (pos >= promptTokens.length - 1) {
-                        contentArea.value += text;
-                        contentArea.scrollTop = contentArea.scrollHeight;
-                        generatedTokens++;
-                    }
-                    
-                    token = next;
-                    pos++;
-                    
-                    await new Promise(resolve => setTimeout(resolve, 0));
-                }
-
-                const endTime = performance.now();
-                const seconds = (endTime - startTime) / 1000;
-                const tokensPerSecond = (generatedTokens / seconds).toFixed(1);
-                statsDiv.textContent = `${tokensPerSecond} tokens/s`;
-
-            } catch (error) {
-                console.error('Generation error:', error);
-                contentArea.value += '\nError: ' + error.message;
-            } finally {
-                isGenerating = false;
-                generateBtn.disabled = false;
-                contentArea.disabled = false;
+                return new WasmTransformer(
+                    new Uint8Array(modelBytes),
+                    new Uint8Array(tokenizerBytes),
+                    0.8,
+                    0.9
+                );
             }
-        }
 
-        generateBtn.addEventListener('click', generate);
-    </script>
-</body>
+            async function generate() {
+                if (isGenerating) return;
+
+                try {
+                    isGenerating = true;
+                    generateBtn.disabled = true;
+                    contentArea.disabled = true;
+                    statsDiv.textContent = "";
+
+                    const prompt = contentArea.value;
+                    transformer = await loadModel();
+                    const promptTokens = transformer.encode(prompt);
+                    let token = promptTokens[0];
+                    let pos = 0;
+
+                    contentArea.value = prompt;
+                    const startTime = performance.now();
+                    let generatedTokens = 0;
+
+                    while (pos < 256) {
+                        transformer.forward(token, pos);
+                        const next = transformer.get_next_token(
+                            token,
+                            pos,
+                            promptTokens
+                        );
+
+                        if (next === 1) break;
+
+                        const text = transformer.decode(token, next);
+                        if (pos >= promptTokens.length - 1) {
+                            contentArea.value += text;
+                            contentArea.scrollTop = contentArea.scrollHeight;
+                            generatedTokens++;
+                        }
+
+                        token = next;
+                        pos++;
+
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                    }
+
+                    const endTime = performance.now();
+                    const seconds = (endTime - startTime) / 1000;
+                    const tokensPerSecond = (generatedTokens / seconds).toFixed(
+                        1
+                    );
+                    statsDiv.textContent = `${tokensPerSecond} tokens/s`;
+                } catch (error) {
+                    console.error("Generation error:", error);
+                    contentArea.value += "\nError: " + error.message;
+                } finally {
+                    isGenerating = false;
+                    generateBtn.disabled = false;
+                    contentArea.disabled = false;
+                }
+            }
+
+            generateBtn.addEventListener("click", generate);
+        </script>
+    </body>
 </html>
