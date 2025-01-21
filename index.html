@@ -31,9 +31,9 @@
                                 href="https://arxiv.org/abs/2305.07759"
                                 target="_blank"
                                 >children's stories</a
-                            >. Start with a story prompt and let it complete
-                            your tale - runs Rust+WASM completely directly in
-                            your browser.
+                            >. Start with a prompt and let it complete your tale
+                            - runs Rust+WASM completely directly in your
+                            browser. (~)
                             <a
                                 class="text-indigo-600"
                                 href="https://qharo.github.io/projects/llama2.rs/"
@@ -44,22 +44,6 @@
                     </div>
 
                     <div class="space-y-4">
-                        <!-- <h3 class="text-xl font-semibold">How to use</h3>
-                        <ul class="space-y-3 text-gray-600">
-                            <li class="flex items-center gap-2">
-                                <span class="text-2xl">✍️</span>
-                                Write 2-3 sentences to start your story
-                            </li>
-                            <li class="flex items-center gap-2">
-                                <span class="text-2xl">🚀</span>
-                                Click Generate to continue the narrative
-                            </li>
-                            <li class="flex items-center gap-2">
-                                <span class="text-2xl">🔄</span>
-                                Edit & repeat to guide the AI's direction
-                            </li>
-                        </ul> -->
-
                         <!-- Generate button moved here -->
                         <button
                             id="generate"
@@ -103,6 +87,7 @@
             const statsDiv = document.getElementById("stats");
 
             async function loadModel() {
+                console.log("Loading...");
                 if (transformer) return transformer;
                 await init();
 
@@ -112,6 +97,7 @@
                 const tokenizerResponse = await fetch("tokenizer.bin");
                 const tokenizerBytes = await tokenizerResponse.arrayBuffer();
 
+                console.log("Loaded");
                 return new WasmTransformer(
                     new Uint8Array(modelBytes),
                     new Uint8Array(tokenizerBytes),
@@ -128,6 +114,7 @@
                     generateBtn.disabled = true;
                     contentArea.disabled = true;
                     statsDiv.textContent = "";
+                    console.log("started");
 
                     const prompt = contentArea.value;
                     transformer = await loadModel();
