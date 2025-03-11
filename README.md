@@ -1,5 +1,10 @@
 # Llama2.rs
 
+
+https://github.com/user-attachments/assets/74f5fffc-22b6-4c4f-bb51-ccfc114a38cf
+
+
+
 A Rust implementation of [llama2.c](https://github.com/karpathy/llama2.c), complete with a [WASM-backed GitHub Page](https://qharo.github.io/llama2.rs/) running the 15M param model in the browser. Find more information [here](https://qharo.github.io/projects/llama2.rs/).
 
 ### Setup
