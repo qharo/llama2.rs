@@ -1,12 +1,9 @@
-// lib.rs
 use wasm_bindgen::prelude::*;
-use js_sys::Float32Array;
-use web_sys::{console, WebGl2RenderingContext};
 use ndarray::{Array1, Array2, Array3};
 mod main;
 use main::{Transformer, Tokenizer, Sampler};
 
-// Re-export Config and other necessary structs with wasm_bindgen
+// Re-export necessary structs with wasm_bindgen
 #[wasm_bindgen]
 #[derive(Debug, Copy, Clone)]
 pub struct WasmConfig {
@@ -95,7 +92,7 @@ impl WasmTransformer {
     }
     
     #[wasm_bindgen]
-    pub fn get_next_token(&mut self, prev_token: usize, pos: usize, prompt_tokens: Option<Vec<usize>>) -> usize {
+    pub fn get_next_token(&mut self, pos: usize, prompt_tokens: Option<Vec<usize>>) -> usize {
         if let Some(tokens) = prompt_tokens {
             if pos < tokens.len() - 1 {
                 return tokens[pos + 1];

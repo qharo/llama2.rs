@@ -10,15 +10,6 @@ use std::cmp::Ordering;
 use std::time::Instant;
 use std::io::Cursor;
 
-// Define the macro before any usage
-#[macro_export]
-macro_rules! console_log {
-    ($($t:tt)*) => {
-        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!($($t)*)))
-    };
-}
-
-
 // =======================================================
 // =================TRANSFORMER CONFIG====================
 // =======================================================
@@ -63,7 +54,6 @@ pub struct RunState {
     q: Array1<f32>,
     k: Array1<f32>,
     v: Array1<f32>,
-    att: Array2<f32>,
     pub logits: Array1<f32>,
     key_cache: Array3<f32>,
     value_cache: Array3<f32>,
@@ -99,7 +89,6 @@ impl RunState {
             q: Array1::zeros(config.dim),
             k: Array1::zeros(kv_dim),
             v: Array1::zeros(kv_dim),
-            att: Array2::zeros((config.n_heads, config.seq_len)),
             logits: Array1::zeros(config.vocab_size),
             key_cache: Array3::zeros((config.n_layers, config.seq_len, kv_dim)),
             value_cache: Array3::zeros((config.n_layers, config.seq_len, kv_dim)),
@@ -118,154 +107,6 @@ pub struct Transformer{
 }
 
 // ========== UTIL FUNCTIONS =========
-
-fn load_checkpoint(checkpoint_path: &str) -> io::Result<(Config, TransformerWeights)> {
-    let mut file = File::open(checkpoint_path)?;
-
-    let mut buffer = [0i32; 7]; // 7 fields
-    unsafe {
-        let slice = slice::from_raw_parts_mut(
-            buffer.as_mut_ptr() as *mut u8,
-            buffer.len() * std::mem::size_of::<i32>()
-        );
-        file.read_exact(slice)?;
-    }
-    let config = Config {
-        dim: buffer[0] as usize,
-        hidden_dim: buffer[1] as usize,
-        n_layers: buffer[2] as usize,
-        n_heads: buffer[3] as usize,
-        n_kv_heads: buffer[4] as usize,
-        vocab_size: buffer[5] as usize,
-        seq_len: buffer[6] as usize,
-    };
-
-    let shared_weights = config.vocab_size > 0;
-
-    file.seek(SeekFrom::Start(0))?;
-
-    let mmap = unsafe { MmapOptions::new().map(&file)? };
-    let weights_ptr = unsafe { mmap.as_ptr().add((7 * std::mem::size_of::<i32>())) as *const f32 };
-
-    let head_size = (config.dim / config.n_heads) as usize;
-    let mut offset = 0;
-
-    unsafe {
-        let token_embedding_table = weights_ptr.add(offset);        
-        offset += config.vocab_size * config.dim;
-
-        let rms_att_weight = weights_ptr.add(offset); 
-        offset += config.n_layers * config.dim;
-
-        let wq = weights_ptr.add(offset);     
-        offset += config.n_layers * config.dim * (config.n_heads * head_size);
-
-        let wk = weights_ptr.add(offset);
-        offset += config.n_layers * config.dim * (config.n_kv_heads * head_size);
-
-        let wv = weights_ptr.add(offset);
-        offset += config.n_layers * config.dim * (config.n_kv_heads * head_size);
-
-        let wo = weights_ptr.add(offset);
-        offset += config.n_layers * (config.n_heads * head_size) * config.dim;
-
-        let rms_ffn_weight = weights_ptr.add(offset);
-        offset += config.n_layers * config.dim;
-
-        let w1 = weights_ptr.add(offset);
-        offset += config.n_layers * config.dim * config.hidden_dim;
-
-        let w2 = weights_ptr.add(offset);
-        offset += config.n_layers * config.hidden_dim * config.dim;
-
-        let w3 = weights_ptr.add(offset);
-        offset += config.n_layers * config.dim * config.hidden_dim;
-
-        let rms_final_weight = weights_ptr.add(offset);
-        offset += config.vocab_size * config.dim;
-        offset += config.dim;
-        
-        offset += config.seq_len * head_size; // Skip rope frequencies
-
-        let wcls_ptr = if shared_weights { 
-            token_embedding_table 
-        } else { 
-            weights_ptr.add(offset) 
-        };
-
-        // Now convert to ndarray types by copying the data
-        let weights = TransformerWeights {
-            token_embedding_table: Array2::from_shape_vec(
-                (config.vocab_size, config.dim),
-                std::slice::from_raw_parts(token_embedding_table, config.vocab_size * config.dim).to_vec()
-            ).unwrap(),
-            
-            rms_att_weight: Array2::from_shape_vec(
-                (config.n_layers, config.dim),
-                std::slice::from_raw_parts(rms_att_weight, config.n_layers * config.dim).to_vec()
-            ).unwrap(),
-            
-            wq: Array3::from_shape_vec(
-                (config.n_layers, config.dim, config.n_heads * head_size),
-                std::slice::from_raw_parts(wq, config.n_layers * config.dim * (config.n_heads * head_size)).to_vec()
-            ).unwrap(),
-            
-            wk: Array3::from_shape_vec(
-                (config.n_layers, config.dim, config.n_kv_heads * head_size),
-                std::slice::from_raw_parts(wk, config.n_layers * config.dim * (config.n_kv_heads * head_size)).to_vec()
-            ).unwrap(),
-            
-            wv: Array3::from_shape_vec(
-                (config.n_layers, config.dim, config.n_kv_heads * head_size),
-                std::slice::from_raw_parts(wv, config.n_layers * config.dim * (config.n_kv_heads * head_size)).to_vec()
-            ).unwrap(),
-            
-            wo: Array3::from_shape_vec(
-                (config.n_layers, config.n_heads * head_size, config.dim),
-                std::slice::from_raw_parts(wo, config.n_layers * (config.n_heads * head_size) * config.dim).to_vec()
-            ).unwrap(),
-            
-            rms_ffn_weight: Array2::from_shape_vec(
-                (config.n_layers, config.dim),
-                std::slice::from_raw_parts(rms_ffn_weight, config.n_layers * config.dim).to_vec()
-            ).unwrap(),
-            
-            w1: Array3::from_shape_vec(
-                (config.n_layers, config.hidden_dim, config.dim),
-                std::slice::from_raw_parts(w1, config.n_layers * config.dim * config.hidden_dim).to_vec()
-            ).unwrap(),
-            
-            w2: Array3::from_shape_vec(
-                (config.n_layers, config.dim, config.hidden_dim),
-                std::slice::from_raw_parts(w2, config.n_layers * config.hidden_dim * config.dim).to_vec()
-            ).unwrap(),
-            
-            w3: Array3::from_shape_vec(
-                (config.n_layers, config.hidden_dim, config.dim),
-                std::slice::from_raw_parts(w3, config.n_layers * config.dim * config.hidden_dim).to_vec()
-            ).unwrap(),
-            
-            rms_final_weight: Array1::from_shape_vec(
-                config.dim,
-                std::slice::from_raw_parts(rms_final_weight, config.dim).to_vec()
-            ).unwrap(),
-            
-            wcls: if shared_weights {
-                Array2::from_shape_vec(
-                    (config.vocab_size, config.dim),
-                    std::slice::from_raw_parts(token_embedding_table, config.vocab_size * config.dim).to_vec()
-                ).unwrap()
-            } else {
-                Array2::from_shape_vec(
-                    (config.vocab_size, config.dim),
-                    std::slice::from_raw_parts(wcls_ptr, config.vocab_size * config.dim).to_vec()
-                ).unwrap()
-            },
-        };
-
-        Ok((config, weights))
-    }
-}
 
 fn parse_weights_from_ptr<T: AsRef<[u8]>>(
     data: T,
@@ -445,7 +286,6 @@ fn parse_weights_from_ptr<T: AsRef<[u8]>>(
     }
 }
 
-// OLD RMS NORM BELOW
 fn rms_norm(out: &mut Array1<f32>, x: &Array1<f32>, weight: &ArrayView1<f32>) {
     // Calculate sum of squares
     let ss: f32 = x.iter().map(|&v| v * v).sum::<f32>();
